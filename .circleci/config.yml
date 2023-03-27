@@ -1,25 +1,148 @@
 # Python CircleCI 2.0 configuration file
 version: 2
-jobs:
-  build:
+orbs:
+  jira: circleci/jira@<<pipeline.parameters.dev-orb-version>>
+  orb-tools: circleci/orb-tools@9.0
+  circleci-cli: circleci/circleci-cli@0.1
+
+parameters:
+  # These pipeline parameters are required by the "trigger-integration-tests-workflow"
+  # job, by default.
+  run-integration-tests:
+    type: boolean
+    default: false
+  dev-orb-version:
+    type: string
+    default: "dev:alpha"
+    jobs:
+  # This job is an example of an integration testing job.
+  # This job should execute a command from your orb and verify
+  # the output is as expected, otherwise the job should fail.
+  #
+  # Rename this job and add more as needed.
+  #
+  integration-test-1:
     docker:
-      - image: circleci/python:3.7
-
-    working_directory: ~/repo
-
+      - image: cimg/base:2020.02
     steps:
-      # Step 1: obtain repo from GitHub
       - checkout
-      # Step 2: create virtual env and install dependencies
+      - circleci-cli/install
       - run:
-          name: install dependencies
+          name: Install BATS and YQ
           command: |
-            python3 -m venv venv
-            . venv/bin/activate
-            pip install -r requirements.txt
-      # Step 3: run linter and tests
+            cd /tmp && git clone https://github.com/bats-core/bats-core.git && cd bats-core
+            sudo ./install.sh /usr/local
+            echo
+            echo "BATS installed"
+            echo
+            curl -L https://github.com/mikefarah/yq/releases/download/2.1.1/yq_linux_amd64 -o yq
+            chmod a+x yq
+            sudo mv yq /usr/local/bin/
+            echo
+            echo "YQ installed"
+            echo
       - run:
-          name: run tests
+          name: Test against published dev version using BATS
           command: |
-            . venv/bin/activate
-            pytest -v --cov=calculator
+            export BATS_IMPORT_DEV_ORB="circleci/jira@dev:${CIRCLE_SHA1:0:7}"
+            bats tests
+      - store_artifacts:
+          path: /tmp
+
+workflows:
+  # This `lint-pack_validate_publish-dev` workflow will run on any commit.
+  lint_pack-validate_publish-dev:
+    unless: << pipeline.parameters.run-integration-tests >>
+    jobs:
+      - orb-tools/lint
+      # pack your orb YAML files to a single orb.yml
+      # validate the orb.yml file to ensure it is well-formed
+      - orb-tools/pack:
+          requires:
+            - orb-tools/lint
+
+      # release dev version of orb, for testing & possible publishing.
+      # orb will be published as dev:alpha and dev:${CIRCLE_SHA1:0:7}.
+      # requires a CircleCI API token to be stored as CIRCLE_TOKEN (default)
+      # https://circleci.com/docs/2.0/managing-api-tokens
+      # store CIRCLE_TOKEN as a project env var or Contexts resource
+      # if using Contexts, add your context below
+      - orb-tools/publish-dev:
+          orb-name: circleci/jira
+          context: orb-publishing
+          requires:
+            - orb-tools/pack
+
+      # trigger an integration workflow to test the
+      # dev:${CIRCLE_SHA1:0:7} version of your orb
+      - orb-tools/trigger-integration-tests-workflow:
+          name: trigger-integration-dev
+          context: orb-publishing
+          requires:
+            - orb-tools/publish-dev
+
+  # This `integration-tests_prod-release` workflow will only run
+  # when the run-integration-tests pipeline parameter is set to true.
+  # It is meant to be triggered by the "trigger-integration-tests-workflow"
+  # job, and run tests on <your orb>@dev:${CIRCLE_SHA1:0:7}.
+  integration-tests_prod-release:
+    when: << pipeline.parameters.run-integration-tests >>
+    jobs:
+      # your integration test jobs go here: essentially, run all your orb's
+      # jobs and commands to ensure they behave as expected. or, run other
+      # integration tests of your choosing
+
+      # an example job
+      - integration-test-1:
+          context: orb-publishing
+
+      # publish a semver version of the orb. relies on
+      # the commit subject containing the text "[semver:patch|minor|major|skip]"
+      # as that will determine whether a patch, minor or major
+      # version will be published or if publishing should
+      # be skipped.
+      # e.g. [semver:patch] will cause a patch version to be published.
+      - orb-tools/dev-promote-prod-from-commit-subject:
+          orb-name: circleci/jira
+          context: orb-publishing
+          add-pr-comment: true
+          pr-number-sed-expression: 's/.*(#\([0-9]*\)).*/\1/p'
+          bot-token-variable: GHI_TOKEN
+          bot-user: cpe-bot
+          fail-if-semver-not-indicated: true
+          publish-version-tag: true
+          ssh-fingerprints: 8a:6b:e8:d5:90:56:3e:70:8d:a5:4e:74:50:07:8f:8e
+          requires:
+            - integration-test-1
+          filters:
+            branches:
+              only: master
+# jobs:
+#   build:
+#     docker:
+#       - image: circleci/python:3.7
+
+#     working_directory: ~/repo
+
+
+#     steps:
+#       # Step 1: obtain repo from GitHub
+#       - checkout
+#       # Step 2: create virtual env and install dependencies
+#       - run:
+#           name: install dependencies
+#           command: |
+#             python3 -m venv venv
+#             . venv/bin/activate
+#             pip install -r requirements.txt
+#             - jira/notify
+#       - jira/notify
+#       # Step 3: run linter and tests
+#       - run:
+#           name: run tests
+#           command: |
+#             . venv/bin/activate
+#             pytest -v --cov=calculator
+      
+     
+      
